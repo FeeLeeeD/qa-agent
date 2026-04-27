@@ -60,10 +60,9 @@ const buildMockEchoPhase = (): Phase<MockEchoInput, MockEchoOutput> => ({
   maxSteps: PHASE_MAX_STEPS,
   timeoutMs: PHASE_TIMEOUT_MS,
   outputSchema: mockEchoOutputSchema,
-  systemPrompt:
-    "You are a deterministic echo. Respond with the JSON object the user asks for. Knowledge: {{knowledge}}",
+  systemPrompt: "You are a deterministic echo. Knowledge: {{knowledge}}",
   buildUserPrompt: (input, knowledge) =>
-    `Return the following JSON object exactly, with no extra commentary: {"echoed": "${input.phrase}", "receivedKnowledge": "${knowledge}"}.`,
+    `Echo the phrase '${input.phrase}' and the knowledge '${knowledge}' into the structured result.`,
 });
 
 const mismatchedSchema = z.object({
@@ -79,10 +78,9 @@ const buildMismatchedPhase = (): Phase<
   maxSteps: PHASE_MAX_STEPS,
   timeoutMs: PHASE_TIMEOUT_MS,
   outputSchema: mismatchedSchema,
-  systemPrompt:
-    "You are a deterministic echo. Respond with the JSON object the user asks for. Knowledge: {{knowledge}}",
+  systemPrompt: "You are a deterministic echo. Knowledge: {{knowledge}}",
   buildUserPrompt: (input, knowledge) =>
-    `Return the following JSON object exactly, with no extra commentary: {"echoed": "${input.phrase}", "receivedKnowledge": "${knowledge}"}.`,
+    `Echo the phrase '${input.phrase}' and the knowledge '${knowledge}' into the structured result.`,
 });
 
 const main = async (): Promise<void> => {

@@ -2,11 +2,10 @@ import {
   AISDKError,
   APICallError,
   generateText,
-  NoObjectGeneratedError,
-  Output,
   type StepResult,
   stepCountIs,
   type ToolSet,
+  tool,
 } from "ai";
 import { logger } from "../logger.ts";
 import { finishPhase, startPhase } from "../storage/index.ts";
@@ -14,6 +13,14 @@ import { writeStepArtifact } from "./artifacts.ts";
 import type { Phase, PhaseError, PhaseResult, RunPhaseArgs } from "./types.ts";
 
 const KNOWLEDGE_PLACEHOLDER = "{{knowledge}}";
+
+const FINAL_ANSWER_TOOL = "__final_answer";
+
+const FINAL_ANSWER_INSTRUCTION = [
+  `When you have completed the task, call the \`${FINAL_ANSWER_TOOL}\` tool exactly once`,
+  "with the structured result that conforms to its input schema.",
+  `Do not output text after calling it. Do not call \`${FINAL_ANSWER_TOOL}\` more than once.`,
+].join(" ");
 
 interface ToolErrorRecord {
   details: string;
@@ -168,9 +175,6 @@ const classifyThrown = (
   if (abortedByTimer) {
     return { kind: "timeout", afterMs: timeoutMs };
   }
-  if (NoObjectGeneratedError.isInstance(err)) {
-    return { kind: "schema_validation", details: err.message };
-  }
   if (APICallError.isInstance(err)) {
     return { kind: "model_error", details: formatApiCallError(err) };
   }
@@ -323,7 +327,20 @@ export const runPhase = async <TInput, TOutput>(
     });
   }
 
-  const systemPrompt = buildSystemPrompt(phase.systemPrompt, knowledge);
+  // __final_answer is injected by the runner — phases do NOT list it in
+  // allowedTools. It sits alongside the phase's whitelisted MCP tools.
+  const llmTools: ToolSet = {
+    ...filteredTools,
+    [FINAL_ANSWER_TOOL]: tool({
+      description:
+        "Return your final structured result by calling this tool exactly once. " +
+        "Do not respond with plain text after calling it.",
+      inputSchema: phase.outputSchema,
+    }),
+  };
+
+  const builtSystem = buildSystemPrompt(phase.systemPrompt, knowledge);
+  const systemPrompt = `${builtSystem}\n\n${FINAL_ANSWER_INSTRUCTION}`;
   const userPrompt = phase.buildUserPrompt(input, knowledge);
 
   const abortController = new AbortController();
@@ -336,15 +353,18 @@ export const runPhase = async <TInput, TOutput>(
   try {
     const result = await generateText({
       model,
-      tools: filteredTools,
+      tools: llmTools,
+      toolChoice: "auto",
       system: systemPrompt,
       prompt: userPrompt,
       stopWhen: stepCountIs(phase.maxSteps),
       temperature: 0,
-      output: Output.object<TOutput>({ schema: phase.outputSchema }),
       abortSignal: abortController.signal,
       onStepFinish: (step) => {
         stepsCount += 1;
+        const hasFinalAnswer = step.toolCalls.some(
+          (c) => c.toolName === FINAL_ANSWER_TOOL
+        );
         writeStepArtifact({
           runDir,
           phaseName: phase.name,
@@ -357,6 +377,7 @@ export const runPhase = async <TInput, TOutput>(
             toolResults: step.toolResults,
             finishReason: step.finishReason,
             usage: step.usage,
+            hasFinalAnswer,
           },
         });
         if (firstToolError === undefined) {
@@ -383,8 +404,11 @@ export const runPhase = async <TInput, TOutput>(
       });
     }
 
-    const lastStep = result.steps.at(-1);
-    if (!lastStep || lastStep.finishReason !== "stop") {
+    const finalAnswerCalls = result.steps
+      .flatMap((s) => s.toolCalls)
+      .filter((c) => c.toolName === FINAL_ANSWER_TOOL);
+
+    if (finalAnswerCalls.length === 0) {
       return finalizeFailed<TOutput>({
         phaseId,
         phaseName: phase.name,
@@ -395,14 +419,38 @@ export const runPhase = async <TInput, TOutput>(
       });
     }
 
-    const output = result.output;
+    if (finalAnswerCalls.length > 1) {
+      logger.warn("phase_multiple_final_answers", {
+        runId,
+        phaseId,
+        phase: phase.name,
+        count: finalAnswerCalls.length,
+      });
+    }
+
+    const lastFinalCall = finalAnswerCalls.at(-1);
+    const parsed = phase.outputSchema.safeParse(lastFinalCall?.input);
+    if (!parsed.success) {
+      return finalizeFailed<TOutput>({
+        phaseId,
+        phaseName: phase.name,
+        runId,
+        steps: stepsCount,
+        startedAt,
+        error: {
+          kind: "schema_validation",
+          details: parsed.error.message,
+        },
+      });
+    }
+
     return finalizeOk<TOutput>({
       phaseId,
       phaseName: phase.name,
       runId,
       steps: stepsCount,
       startedAt,
-      output,
+      output: parsed.data,
     });
   } catch (err) {
     if (firstToolError !== undefined) {

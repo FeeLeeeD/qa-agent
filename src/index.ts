@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { APICallError } from "ai";
 import { loadEnv } from "./env.ts";
-import { createModel } from "./llm/model.ts";
+import { createModel } from "./llm/index.ts";
 import { logger } from "./logger.ts";
 import { initMcp } from "./mcp.ts";
 import {

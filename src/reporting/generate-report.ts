@@ -1,8 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { generateText, Output } from "ai";
 import { z } from "zod";
-import { createModel } from "../llm/model.ts";
+import { createModel, generateStructuredObject } from "../llm/index.ts";
 import { logger } from "../logger.ts";
 import {
   getRun,
@@ -310,44 +309,25 @@ const formatDuration = (
 const renderInterpretationSection = async (
   args: FactsArgs
 ): Promise<string> => {
-  const result = await tryGenerateInterpretation(args);
-  if (result.kind === "ok") {
-    return renderInterpretation(result.data);
+  const model = createModel();
+  const userPrompt = buildInterpretationUserPrompt(args);
+
+  const result = await generateStructuredObject({
+    model,
+    schema: interpretationSchema,
+    system: SYSTEM_PROMPT,
+    prompt: userPrompt,
+  });
+
+  if (result.ok) {
+    return renderInterpretation(result.value);
   }
-  return renderInterpretationFallback(result.message);
-};
 
-interface InterpretationResultOk {
-  data: Interpretation;
-  kind: "ok";
-}
-interface InterpretationResultErr {
-  kind: "err";
-  message: string;
-}
-
-const errorMessage = (cause: unknown): string =>
-  cause instanceof Error ? cause.message : String(cause);
-
-const tryGenerateInterpretation = async (
-  args: FactsArgs
-): Promise<InterpretationResultOk | InterpretationResultErr> => {
-  try {
-    const model = createModel();
-    const userPrompt = buildInterpretationUserPrompt(args);
-    const result = await generateText({
-      model,
-      system: SYSTEM_PROMPT,
-      prompt: userPrompt,
-      temperature: 0,
-      output: Output.object<Interpretation>({ schema: interpretationSchema }),
-    });
-    return { kind: "ok", data: result.output };
-  } catch (err) {
-    const message = errorMessage(err);
-    logger.warn("report_interpretation_failed", { error: message });
-    return { kind: "err", message };
-  }
+  logger.warn("report_interpretation_failed", {
+    kind: result.kind,
+    details: result.details,
+  });
+  return renderInterpretationFallback(`${result.kind}: ${result.details}`);
 };
 
 const buildInterpretationUserPrompt = (args: FactsArgs): string => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { loadEnv } from "../env.ts";
-import { createModel } from "../llm/model.ts";
+import { createModel } from "../llm/index.ts";
 import {
   type CreateJobStubOutput,
   createJobStubPhase,
@@ -134,6 +134,10 @@ const runHappyPath = async (): Promise<string> => {
   assert.ok(
     typeof obs?.targetId === "string" && reportBody.includes(obs.targetId),
     `expected report to contain stubbed jobId "${obs?.targetId}"`
+  );
+  assert.ok(
+    !reportBody.includes("could not be generated"),
+    "expected interpretation to be populated (not fallback)"
   );
 
   closeRunDatabase(result.runId);
