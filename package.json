@@ -5,17 +5,24 @@
   "scripts": {
     "start": "tsx --env-file=.env src/index.ts",
     "check": "ultracite check",
-    "fix": "ultracite fix"
+    "fix": "ultracite fix",
+    "smoke:storage": "tsx src/storage/__smoke__.ts",
+    "smoke:phases": "tsx --env-file=.env src/phases/__smoke__.ts",
+    "smoke:test-cases": "tsx src/test-cases/__smoke__.ts",
+    "smoke:orchestrator": "tsx --env-file=.env src/orchestrator/__smoke__.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.0",
     "@ai-sdk/openai-compatible": "^2.0.0",
     "@playwright/mcp": "^0.0.70",
     "ai": "^6.0.0",
+    "better-sqlite3": "^12.9.0",
+    "gray-matter": "^4.0.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.12",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
