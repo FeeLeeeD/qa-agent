@@ -10,6 +10,7 @@ The repo is in an early stage: right now it's a playground for probing MCP tool 
 - **Agent loop**: [Vercel AI SDK v6](https://ai-sdk.dev) (`ai`) + `@ai-sdk/openai-compatible` + `@ai-sdk/mcp`
 - **Browser**: [@playwright/mcp](https://github.com/microsoft/playwright-mcp) as a stdio subprocess
 - **LLM**: Claude Sonnet 4.6 via Portkey AI → OpenRouter
+- **Run state**: [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) — one SQLite file per run, validated with [zod](https://zod.dev)
 - **Package manager**: pnpm
 - **Lint/format**: [Ultracite](https://ultracite.ai) (Biome)
 
@@ -23,7 +24,15 @@ src/
 ├── mcp.ts       — Playwright MCP launcher + per-tool-call timing
 ├── metrics.ts   — shared metrics state
 ├── report.ts    — Markdown report writer
-└── logger.ts    — structured JSON logger
+├── logger.ts    — structured JSON logger
+└── storage/     — SQLite-backed run state (runs, phases, observations)
+    ├── db.ts             — connection cache, migrations, runId generator
+    ├── schema.ts         — zod schemas for rows and JSON columns
+    ├── runs.ts           — runs table operations
+    ├── phases.ts         — phase_executions table operations
+    ├── observations.ts   — observations table operations
+    ├── index.ts          — public surface re-exports
+    └── __smoke__.ts      — standalone lifecycle script (run via tsx)
 ```
 
 Every run writes its artifacts (screenshots, page snapshots, console logs, `report.md`) into `reports/<ISO-timestamp>/`.
@@ -59,6 +68,21 @@ After the run finishes, `reports/<timestamp>/report.md` contains a timeline of L
 ```sh
 pnpm check   # Ultracite / Biome — lint
 pnpm fix     # auto-fix
+```
+
+## Run state (SQLite)
+
+Foundation work for a future multi-phase orchestrator that needs to survive process restarts (including 24h pauses between phases). Not yet wired into the agent loop — `src/agent.ts` and `src/index.ts` remain untouched.
+
+- One DB per run at `reports/<runId>/state.db`. `runId` is a sortable id like `20260427T143012-a1b2`.
+- Three tables: `runs`, `phase_executions`, `observations` (intentionally generic — `observations` is keyed by `target_type`/`target_id` so it can grow beyond jobs).
+- Append-only migrations tracked via a `schema_version` table; one open connection cached per `runId`, closed on `finishRun` or process exit.
+- All `*_json` columns are validated through zod on read; writes go through the typed functions in `src/storage/`.
+
+Smoke check (creates a run, exercises phases + observations, re-opens the DB, exits 0):
+
+```sh
+pnpm tsx src/storage/__smoke__.ts
 ```
 
 ## Current scenario
