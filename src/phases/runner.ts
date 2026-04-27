@@ -1,0 +1,330 @@
+import {
+  AISDKError,
+  APICallError,
+  generateText,
+  NoObjectGeneratedError,
+  Output,
+  type StepResult,
+  stepCountIs,
+  type ToolSet,
+} from "ai";
+import { logger } from "../logger.ts";
+import { finishPhase, startPhase } from "../storage/index.ts";
+import { writeStepArtifact } from "./artifacts.ts";
+import type { PhaseError, PhaseResult, RunPhaseArgs } from "./types.ts";
+
+const KNOWLEDGE_PLACEHOLDER = "{{knowledge}}";
+
+interface ToolErrorRecord {
+  details: string;
+  toolName: string;
+}
+
+/**
+ * Build the tool subset the model is allowed to call. Throws (caught by the
+ * runner and returned as `unknown`) when an allowed tool name has no
+ * corresponding entry in `allTools`.
+ */
+const filterTools = (
+  allTools: Record<string, unknown>,
+  allowedTools: readonly string[]
+): ToolSet => {
+  const filtered: Record<string, unknown> = {};
+  for (const name of allowedTools) {
+    if (!Object.hasOwn(allTools, name)) {
+      throw new Error(
+        `phase runner: allowed tool "${name}" is not present in allTools`
+      );
+    }
+    filtered[name] = allTools[name];
+  }
+  return filtered as ToolSet;
+};
+
+const buildSystemPrompt = (template: string, knowledge: string): string =>
+  template.split(KNOWLEDGE_PLACEHOLDER).join(knowledge);
+
+const errorMessage = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause);
+
+/**
+ * Inspect a step's content for `tool-error` parts. AI SDK v6 surfaces tool
+ * execute() rejections as `tool-error` content parts; they do not appear in
+ * `step.toolResults`.
+ */
+const collectToolErrors = (
+  step: StepResult<ToolSet>
+): readonly ToolErrorRecord[] => {
+  const errors: ToolErrorRecord[] = [];
+  for (const part of step.content) {
+    if (part.type === "tool-error") {
+      errors.push({
+        toolName: part.toolName,
+        details: errorMessage(part.error),
+      });
+    }
+  }
+  return errors;
+};
+
+interface FinalizeArgs {
+  phaseId: number;
+  phaseName: string;
+  runId: string;
+  startedAt: number;
+  steps: number;
+}
+
+const finalizeOk = <TOutput>(
+  args: FinalizeArgs & { output: TOutput }
+): PhaseResult<TOutput> => {
+  const durationMs = performance.now() - args.startedAt;
+  finishPhase({
+    phaseId: args.phaseId,
+    status: "done",
+    output: args.output,
+  });
+  logger.info("phase_finished", {
+    runId: args.runId,
+    phaseId: args.phaseId,
+    phase: args.phaseName,
+    status: "ok",
+    steps: args.steps,
+    durationMs: Math.round(durationMs),
+  });
+  return {
+    status: "ok",
+    output: args.output,
+    phaseId: args.phaseId,
+    steps: args.steps,
+    durationMs,
+  };
+};
+
+const finalizeFailed = <TOutput>(
+  args: FinalizeArgs & { error: PhaseError }
+): PhaseResult<TOutput> => {
+  const durationMs = performance.now() - args.startedAt;
+  const details =
+    "details" in args.error ? args.error.details : JSON.stringify(args.error);
+  finishPhase({
+    phaseId: args.phaseId,
+    status: "failed",
+    error: `${args.error.kind}: ${details}`,
+  });
+  logger.warn("phase_failed", {
+    runId: args.runId,
+    phaseId: args.phaseId,
+    phase: args.phaseName,
+    kind: args.error.kind,
+    details,
+  });
+  logger.info("phase_finished", {
+    runId: args.runId,
+    phaseId: args.phaseId,
+    phase: args.phaseName,
+    status: "failed",
+    steps: args.steps,
+    durationMs: Math.round(durationMs),
+  });
+  return {
+    status: "failed",
+    error: args.error,
+    phaseId: args.phaseId,
+    steps: args.steps,
+    durationMs,
+  };
+};
+
+/**
+ * Build a one-line, human-actionable detail string from an `APICallError`.
+ * The default `.message` from Portkey/OpenRouter is often just "Bad Request";
+ * the useful information lives in `statusCode`, `url`, and `responseBody`.
+ */
+const formatApiCallError = (err: APICallError): string => {
+  const parts: string[] = [];
+  if (err.statusCode !== undefined) {
+    parts.push(`status=${err.statusCode}`);
+  }
+  parts.push(`message=${err.message}`);
+  if (err.url) {
+    parts.push(`url=${err.url}`);
+  }
+  if (err.responseBody && err.responseBody.length > 0) {
+    parts.push(`body=${err.responseBody}`);
+  }
+  return parts.join(" ");
+};
+
+/**
+ * Map a thrown value from `generateText` to a `PhaseError`. The runner is
+ * the boundary that converts SDK exceptions into structured outcomes.
+ */
+const classifyThrown = (
+  err: unknown,
+  abortedByTimer: boolean,
+  timeoutMs: number
+): PhaseError => {
+  if (abortedByTimer) {
+    return { kind: "timeout", afterMs: timeoutMs };
+  }
+  if (NoObjectGeneratedError.isInstance(err)) {
+    return { kind: "schema_validation", details: err.message };
+  }
+  if (APICallError.isInstance(err)) {
+    return { kind: "model_error", details: formatApiCallError(err) };
+  }
+  if (AISDKError.isInstance(err)) {
+    return { kind: "model_error", details: err.message };
+  }
+  return { kind: "unknown", details: errorMessage(err) };
+};
+
+/**
+ * Universal Phase runner. Persists a `phase_executions` row, runs the LLM
+ * with a filtered tool set and structured output, captures per-step
+ * artifacts, and returns a typed result. Never throws on AI SDK errors,
+ * schema mismatches, timeouts, or tool failures — all are returned as
+ * `{ status: "failed", error }`.
+ */
+export const runPhase = async <TInput, TOutput>(
+  args: RunPhaseArgs<TInput, TOutput>
+): Promise<PhaseResult<TOutput>> => {
+  const { phase, input, runId, runDir, allTools, model } = args;
+  const knowledge = args.knowledge ?? "";
+
+  const { phaseId } = startPhase({ runId, phaseName: phase.name });
+  const startedAt = performance.now();
+  let stepsCount = 0;
+  let firstToolError: ToolErrorRecord | undefined;
+
+  logger.info("phase_started", {
+    runId,
+    phaseId,
+    phase: phase.name,
+    allowedTools: phase.allowedTools.length,
+  });
+
+  let filteredTools: ToolSet;
+  try {
+    filteredTools = filterTools(allTools, phase.allowedTools);
+  } catch (err) {
+    return finalizeFailed<TOutput>({
+      phaseId,
+      phaseName: phase.name,
+      runId,
+      steps: 0,
+      startedAt,
+      error: { kind: "unknown", details: errorMessage(err) },
+    });
+  }
+
+  const systemPrompt = buildSystemPrompt(phase.systemPrompt, knowledge);
+  const userPrompt = phase.buildUserPrompt(input, knowledge);
+
+  const abortController = new AbortController();
+  let abortedByTimer = false;
+  const timeoutHandle = setTimeout(() => {
+    abortedByTimer = true;
+    abortController.abort();
+  }, phase.timeoutMs);
+
+  try {
+    const result = await generateText({
+      model,
+      tools: filteredTools,
+      system: systemPrompt,
+      prompt: userPrompt,
+      stopWhen: stepCountIs(phase.maxSteps),
+      temperature: 0,
+      output: Output.object<TOutput>({ schema: phase.outputSchema }),
+      abortSignal: abortController.signal,
+      onStepFinish: (step) => {
+        stepsCount += 1;
+        writeStepArtifact({
+          runDir,
+          phaseName: phase.name,
+          stepIndex: stepsCount,
+          payload: {
+            stepIndex: stepsCount,
+            timestamp: new Date(Date.now()).toISOString(),
+            text: step.text,
+            toolCalls: step.toolCalls,
+            toolResults: step.toolResults,
+            finishReason: step.finishReason,
+            usage: step.usage,
+          },
+        });
+        if (firstToolError === undefined) {
+          const errs = collectToolErrors(step);
+          if (errs.length > 0) {
+            firstToolError = errs[0];
+          }
+        }
+      },
+    });
+
+    if (firstToolError !== undefined) {
+      return finalizeFailed<TOutput>({
+        phaseId,
+        phaseName: phase.name,
+        runId,
+        steps: stepsCount,
+        startedAt,
+        error: {
+          kind: "tool_call_failed",
+          toolName: firstToolError.toolName,
+          details: firstToolError.details,
+        },
+      });
+    }
+
+    const lastStep = result.steps.at(-1);
+    if (!lastStep || lastStep.finishReason !== "stop") {
+      return finalizeFailed<TOutput>({
+        phaseId,
+        phaseName: phase.name,
+        runId,
+        steps: stepsCount,
+        startedAt,
+        error: { kind: "step_limit_exceeded", steps: stepsCount },
+      });
+    }
+
+    const output = result.output;
+    return finalizeOk<TOutput>({
+      phaseId,
+      phaseName: phase.name,
+      runId,
+      steps: stepsCount,
+      startedAt,
+      output,
+    });
+  } catch (err) {
+    if (firstToolError !== undefined) {
+      return finalizeFailed<TOutput>({
+        phaseId,
+        phaseName: phase.name,
+        runId,
+        steps: stepsCount,
+        startedAt,
+        error: {
+          kind: "tool_call_failed",
+          toolName: firstToolError.toolName,
+          details: firstToolError.details,
+        },
+      });
+    }
+    const error = classifyThrown(err, abortedByTimer, phase.timeoutMs);
+    return finalizeFailed<TOutput>({
+      phaseId,
+      phaseName: phase.name,
+      runId,
+      steps: stepsCount,
+      startedAt,
+      error,
+    });
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+};

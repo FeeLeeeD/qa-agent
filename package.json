@@ -5,7 +5,9 @@
   "scripts": {
     "start": "tsx --env-file=.env src/index.ts",
     "check": "ultracite check",
-    "fix": "ultracite fix"
+    "fix": "ultracite fix",
+    "smoke:storage": "tsx src/storage/__smoke__.ts",
+    "smoke:phases": "tsx --env-file=.env src/phases/__smoke__.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.0",
