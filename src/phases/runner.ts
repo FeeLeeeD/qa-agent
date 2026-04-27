@@ -11,7 +11,7 @@ import {
 import { logger } from "../logger.ts";
 import { finishPhase, startPhase } from "../storage/index.ts";
 import { writeStepArtifact } from "./artifacts.ts";
-import type { PhaseError, PhaseResult, RunPhaseArgs } from "./types.ts";
+import type { Phase, PhaseError, PhaseResult, RunPhaseArgs } from "./types.ts";
 
 const KNOWLEDGE_PLACEHOLDER = "{{knowledge}}";
 
@@ -180,6 +180,97 @@ const classifyThrown = (
   return { kind: "unknown", details: errorMessage(err) };
 };
 
+interface FakePhaseRunArgs<TInput, TOutput> {
+  input: TInput;
+  phase: Phase<TInput, TOutput>;
+  phaseId: number;
+  runDir: string;
+  runId: string;
+  startedAt: number;
+}
+
+/**
+ * Short-circuit path for `kind: "fake"` phases used by stubs and tests.
+ * Skips the LLM, validates `phase.produce(input)` against `outputSchema`,
+ * writes a single `step-001.json` artifact, and persists the row exactly
+ * like a real phase would. Returns `PhaseResult` errors via the same
+ * `PhaseError` shape so callers can't tell the difference.
+ */
+const runFakePhase = <TInput, TOutput>(
+  args: FakePhaseRunArgs<TInput, TOutput>
+): PhaseResult<TOutput> => {
+  const { phase, input, runId, runDir, phaseId, startedAt } = args;
+  if (!phase.produce) {
+    return finalizeFailed<TOutput>({
+      phaseId,
+      phaseName: phase.name,
+      runId,
+      steps: 0,
+      startedAt,
+      error: {
+        kind: "unknown",
+        details: `fake phase "${phase.name}" is missing produce()`,
+      },
+    });
+  }
+
+  let produced: TOutput;
+  try {
+    produced = phase.produce(input);
+  } catch (err) {
+    return finalizeFailed<TOutput>({
+      phaseId,
+      phaseName: phase.name,
+      runId,
+      steps: 0,
+      startedAt,
+      error: { kind: "unknown", details: errorMessage(err) },
+    });
+  }
+
+  const parsed = phase.outputSchema.safeParse(produced);
+  if (!parsed.success) {
+    return finalizeFailed<TOutput>({
+      phaseId,
+      phaseName: phase.name,
+      runId,
+      steps: 0,
+      startedAt,
+      error: {
+        kind: "schema_validation",
+        details: parsed.error.message,
+      },
+    });
+  }
+
+  try {
+    writeStepArtifact({
+      runDir,
+      phaseName: phase.name,
+      stepIndex: 1,
+      payload: { kind: "fake", input, output: parsed.data },
+    });
+  } catch (err) {
+    return finalizeFailed<TOutput>({
+      phaseId,
+      phaseName: phase.name,
+      runId,
+      steps: 0,
+      startedAt,
+      error: { kind: "unknown", details: errorMessage(err) },
+    });
+  }
+
+  return finalizeOk<TOutput>({
+    phaseId,
+    phaseName: phase.name,
+    runId,
+    steps: 1,
+    startedAt,
+    output: parsed.data,
+  });
+};
+
 /**
  * Universal Phase runner. Persists a `phase_executions` row, runs the LLM
  * with a filtered tool set and structured output, captures per-step
@@ -203,7 +294,20 @@ export const runPhase = async <TInput, TOutput>(
     phaseId,
     phase: phase.name,
     allowedTools: phase.allowedTools.length,
+    kind: phase.kind ?? "real",
   });
+
+  // Fake-phase short-circuit: deterministic, no LLM, no tools.
+  if (phase.kind === "fake") {
+    return runFakePhase<TInput, TOutput>({
+      phase,
+      input,
+      runId,
+      runDir,
+      phaseId,
+      startedAt,
+    });
+  }
 
   let filteredTools: ToolSet;
   try {

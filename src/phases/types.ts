@@ -32,6 +32,13 @@ export interface Phase<TInput, TOutput> {
    */
   buildUserPrompt(input: TInput, knowledge: string): string;
 
+  /**
+   * Optional discriminator. When set to `"fake"`, the runner skips the LLM
+   * call entirely and persists the result of `produce(input)` instead.
+   * Real (LLM-driven) phases leave this undefined.
+   */
+  kind?: "fake";
+
   /** Hard cap on agent steps for this phase. */
   maxSteps: number;
   /** Stable identifier, also used as folder name for artifacts. snake_case. */
@@ -42,6 +49,12 @@ export interface Phase<TInput, TOutput> {
    * underlying LLM call and by storage persistence.
    */
   outputSchema: z.ZodType<TOutput>;
+
+  /**
+   * Only consulted when `kind === "fake"`. Returns a deterministic output
+   * object that the runner validates against `outputSchema` and persists.
+   */
+  produce?: (input: TInput) => TOutput;
 
   /**
    * Static system prompt. May reference `{{knowledge}}` placeholder which

@@ -1,68 +1,118 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { APICallError } from "ai";
-import {
-  buildUserPrompt,
-  MODEL_LABEL,
-  runAgent,
-  SYSTEM_PROMPT,
-} from "./agent.ts";
 import { loadEnv } from "./env.ts";
+import { createModel } from "./llm/model.ts";
 import { logger } from "./logger.ts";
-import { launchPlaywrightMcp } from "./mcp.ts";
-import { createMetrics } from "./metrics.ts";
-import { writeReport } from "./report.ts";
+import { initMcp } from "./mcp.ts";
+import {
+  definePhaseSpec,
+  type PhaseSpec,
+  runSession,
+} from "./orchestrator/index.ts";
+import {
+  type CreateJobStubOutput,
+  createJobStubPhase,
+} from "./phases/stubs/create-job-stub.ts";
+import { loginStubPhase } from "./phases/stubs/login-stub.ts";
+import { observeJobStubPhase } from "./phases/stubs/observe-job-stub.ts";
+import { generateReport } from "./reporting/generate-report.ts";
+import { recordObservation } from "./storage/index.ts";
 
+const DEFAULT_TEST_CASE = "baseline";
 const EXIT_FAILURE = 1;
+const MCP_OUTPUT_DIRNAME = "_mcp-session";
 
 const main = async (): Promise<void> => {
   const env = loadEnv();
+  const testCaseName = process.argv[2] ?? DEFAULT_TEST_CASE;
 
-  const reportDir = path.resolve(
+  // Scratch directory the Playwright MCP subprocess can use as cwd. The
+  // orchestrator owns per-run dirs (created inside runSession), so MCP
+  // artifacts that aren't tied to a specific phase land here. Real phases
+  // will eventually thread the runDir into screenshot paths directly.
+  const mcpOutputDir = path.resolve(
     process.cwd(),
     "reports",
-    new Date().toISOString().replace(/[:.]/g, "-")
+    MCP_OUTPUT_DIRNAME
   );
-  await mkdir(reportDir, { recursive: true });
-  logger.info("report directory ready", { reportDir });
+  await mkdir(mcpOutputDir, { recursive: true });
 
-  const metrics = createMetrics({
-    systemPrompt: SYSTEM_PROMPT,
-    prompt: buildUserPrompt(env),
-    model: MODEL_LABEL,
-  });
-
-  const mcp = await launchPlaywrightMcp({
+  const mcp = await initMcp({
     headless: env.HEADLESS,
-    outputDir: reportDir,
-    metrics,
+    outputDir: mcpOutputDir,
   });
+  const model = createModel();
 
+  const pipeline: PhaseSpec[] = [
+    definePhaseSpec({
+      phase: loginStubPhase,
+      buildInput: () => ({ email: env.DEV_APP_EMAIL }),
+    }),
+    definePhaseSpec({
+      phase: createJobStubPhase,
+      buildInput: (ctx) => ({
+        // TODO: per-phase parameter validation lands when real phases ship.
+        listId: ctx.testCase.parameters.list_id as string,
+        // TODO: per-phase parameter validation lands when real phases ship.
+        throttlingAlgorithm: ctx.testCase.parameters
+          .throttling_algorithm as string,
+      }),
+    }),
+    definePhaseSpec({
+      phase: observeJobStubPhase,
+      buildInput: (ctx) => {
+        const created = ctx.outputs[
+          createJobStubPhase.name
+        ] as CreateJobStubOutput;
+        return { jobId: created.jobId };
+      },
+      onSuccess: (output, ctx) => {
+        const created = ctx.outputs[
+          createJobStubPhase.name
+        ] as CreateJobStubOutput;
+        recordObservation({
+          runId: ctx.runId,
+          targetType: "job",
+          targetId: created.jobId,
+          metrics: output,
+          screenshotPaths: [],
+          observedAt: output.observedAt,
+        });
+      },
+    }),
+  ];
+
+  let exitCode = 0;
   try {
-    await runAgent({ env, tools: mcp.tools, metrics });
+    const result = await runSession({
+      testCaseName,
+      pipeline,
+      tools: mcp.tools,
+      model,
+    });
+    const { reportPath } = await generateReport({ runId: result.runId });
+    logger.info("run complete", {
+      runId: result.runId,
+      status: result.status,
+      failedPhase: result.failedPhase,
+      durationMs: Math.round(result.durationMs),
+      reportPath,
+    });
+    if (result.status !== "done") {
+      exitCode = EXIT_FAILURE;
+    }
   } finally {
-    metrics.endedAt = performance.now();
     try {
-      await mcp.close();
+      await mcp.dispose();
     } catch (err) {
-      logger.warn("mcp close failed", {
+      logger.warn("mcp dispose failed", {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    const reportPath = await writeReport({
-      metrics,
-      reportDir,
-      modelLabel: MODEL_LABEL,
-    });
-    logger.info("report written", {
-      reportPath,
-      wallMs: Math.round(
-        (metrics.endedAt ?? performance.now()) - metrics.startedAt
-      ),
-      steps: metrics.steps.length,
-      toolCalls: metrics.toolCalls.length,
-    });
   }
+
+  process.exit(exitCode);
 };
 
 main().catch((err) => {
