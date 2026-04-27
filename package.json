@@ -7,7 +7,9 @@
     "check": "ultracite check",
     "fix": "ultracite fix",
     "smoke:storage": "tsx src/storage/__smoke__.ts",
-    "smoke:phases": "tsx --env-file=.env src/phases/__smoke__.ts"
+    "smoke:phases": "tsx --env-file=.env src/phases/__smoke__.ts",
+    "smoke:test-cases": "tsx src/test-cases/__smoke__.ts",
+    "smoke:orchestrator": "tsx --env-file=.env src/orchestrator/__smoke__.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.0",
@@ -15,6 +17,7 @@
     "@playwright/mcp": "^0.0.70",
     "ai": "^6.0.0",
     "better-sqlite3": "^12.9.0",
+    "gray-matter": "^4.0.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
