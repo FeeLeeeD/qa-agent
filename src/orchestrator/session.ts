@@ -8,6 +8,7 @@ import type { PhaseSpec, SessionContext, SessionResult } from "./types.ts";
 export interface RunSessionArgs {
   model: LanguageModel;
   pipeline: readonly PhaseSpec[];
+  runId: string;
   testCaseName: string;
   /** Tools object returned by `initMcp`. */
   tools: Record<string, unknown>;
@@ -36,7 +37,9 @@ export const runSession = async (
   });
 
   // 2. Open a run row + per-run directory.
-  const { runId, runDir } = createRun({ testCaseName: testCase.name });
+  const { runId, runDir } = createRun(args.runId, {
+    testCaseName: testCase.name,
+  });
   logger.info("session_started", {
     runId,
     runDir,

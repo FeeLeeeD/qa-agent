@@ -1,3 +1,5 @@
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { createMCPClient } from "@ai-sdk/mcp";
 import { Experimental_StdioMCPTransport } from "@ai-sdk/mcp/mcp-stdio";
 import type { ToolSet } from "ai";
@@ -137,9 +139,14 @@ export interface McpSession {
  * args land in `step-NNN.json` artifacts written by the phase runner.
  */
 export const initMcp = async (options: InitMcpOptions): Promise<McpSession> => {
+  const configPath = path.join(options.outputDir, "config.json");
+
   const args = [
     "playwright-mcp",
     "--isolated",
+    "--ignore-https-errors",
+    "--config",
+    configPath,
     "--output-dir",
     options.outputDir,
   ];
@@ -150,13 +157,25 @@ export const initMcp = async (options: InitMcpOptions): Promise<McpSession> => {
   logger.info("initMcp launching", {
     headless: options.headless,
     outputDir: options.outputDir,
+    configPath,
   });
 
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      browser: {
+        contextOptions: { locale: "en-US" },
+      },
+    })
+  );
   const client = await createMCPClient({
     transport: new Experimental_StdioMCPTransport({
       command: "pnpm",
       args: ["exec", ...args],
-      // See `launchPlaywrightMcp` for why cwd is pinned to outputDir.
+      // Playwright MCP resolves `browser_take_screenshot`'s `filename` via
+      // `workspaceFile`, which is anchored on the subprocess `options.cwd`
+      // — not on `--output-dir`. So we pin cwd to the report directory to
+      // make screenshot artifacts land next to the report.
       cwd: options.outputDir,
       env: {
         ...process.env,

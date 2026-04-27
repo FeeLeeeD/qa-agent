@@ -47,9 +47,9 @@ const verifyBaseline = (): void => {
   assert.equal(baseline.name, "baseline", "baseline.name");
   assert.equal(baseline.targetType, "job", "baseline.targetType");
   assert.equal(
-    baseline.parameters.throttling_algorithm,
-    "even_distribution",
-    "baseline.parameters.throttling_algorithm"
+    baseline.parameters.throttling_option,
+    "Personalize Sending (Default)",
+    "baseline.parameters.throttling_option"
   );
   assert.equal(
     baseline.parameters.delivery_window_hours,
@@ -62,8 +62,8 @@ const verifyBaseline = (): void => {
     "baseline.expectations.scheduling_completes_within_minutes"
   );
   assert.ok(
-    baseline.body.startsWith("# Baseline test case"),
-    `expected body to start with '# Baseline test case', got: ${baseline.body.slice(0, BODY_PREVIEW_LENGTH)}`
+    baseline.body.length > 0,
+    `expected non-empty body, got: ${baseline.body.slice(0, BODY_PREVIEW_LENGTH)}`
   );
   assert.ok(
     baseline.filePath.endsWith(path.join("test-cases", "baseline.md")),

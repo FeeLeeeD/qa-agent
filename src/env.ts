@@ -3,6 +3,7 @@ import { z } from "zod";
 const EnvSchema = z
   .object({
     PORTKEY_API_KEY: z.string().min(1, "PORTKEY_API_KEY is required"),
+    PORTKEY_MODEL: z.string().min(1, "PORTKEY_MODEL is required"),
     PORTKEY_VIRTUAL_KEY: z.string().optional(),
     PORTKEY_CONFIG: z.string().optional(),
 

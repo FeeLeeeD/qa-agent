@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { APICallError } from "ai";
 import { loadEnv } from "./env.ts";
+import { loadOverview } from "./knowledge.ts";
 import { createModel } from "./llm/index.ts";
 import { logger } from "./logger.ts";
 import { initMcp } from "./mcp.ts";
@@ -11,30 +12,32 @@ import {
   runSession,
 } from "./orchestrator/index.ts";
 import {
-  type CreateJobStubOutput,
-  createJobStubPhase,
-} from "./phases/stubs/create-job-stub.ts";
-import { loginStubPhase } from "./phases/stubs/login-stub.ts";
-import { observeJobStubPhase } from "./phases/stubs/observe-job-stub.ts";
+  type CreateJobOutput,
+  createJobPhase,
+  type JobMode,
+  loginPhase,
+  observeJobPhase,
+} from "./phases/index.ts";
 import { generateReport } from "./reporting/generate-report.ts";
-import { recordObservation } from "./storage/index.ts";
+import { generateRunId } from "./storage/db.ts";
+import { getRunDir, recordObservation } from "./storage/index.ts";
 
 const DEFAULT_TEST_CASE = "baseline";
 const EXIT_FAILURE = 1;
-const MCP_OUTPUT_DIRNAME = "_mcp-session";
 
 const main = async (): Promise<void> => {
   const env = loadEnv();
   const testCaseName = process.argv[2] ?? DEFAULT_TEST_CASE;
+  const runId = generateRunId();
 
   // Scratch directory the Playwright MCP subprocess can use as cwd. The
   // orchestrator owns per-run dirs (created inside runSession), so MCP
-  // artifacts that aren't tied to a specific phase land here. Real phases
-  // will eventually thread the runDir into screenshot paths directly.
+  // artifacts that aren't tied to a specific phase land here.
   const mcpOutputDir = path.resolve(
     process.cwd(),
     "reports",
-    MCP_OUTPUT_DIRNAME
+    getRunDir(runId),
+    "mcp"
   );
   await mkdir(mcpOutputDir, { recursive: true });
 
@@ -43,40 +46,52 @@ const main = async (): Promise<void> => {
     outputDir: mcpOutputDir,
   });
   const model = createModel();
+  const knowledge = loadOverview();
 
   const pipeline: PhaseSpec[] = [
     definePhaseSpec({
-      phase: loginStubPhase,
-      buildInput: () => ({ email: env.DEV_APP_EMAIL }),
-    }),
-    definePhaseSpec({
-      phase: createJobStubPhase,
-      buildInput: (ctx) => ({
-        // TODO: per-phase parameter validation lands when real phases ship.
-        listId: ctx.testCase.parameters.list_id as string,
-        // TODO: per-phase parameter validation lands when real phases ship.
-        throttlingAlgorithm: ctx.testCase.parameters
-          .throttling_algorithm as string,
+      phase: loginPhase,
+      buildInput: () => ({
+        email: env.DEV_APP_EMAIL,
+        password: env.DEV_APP_PASSWORD,
+        url: env.DEV_APP_URL,
       }),
+      buildKnowledge: () => `The dev app URL is ${env.DEV_APP_URL}.`,
     }),
     definePhaseSpec({
-      phase: observeJobStubPhase,
+      phase: createJobPhase,
       buildInput: (ctx) => {
-        const created = ctx.outputs[
-          createJobStubPhase.name
-        ] as CreateJobStubOutput;
+        const params = ctx.testCase.parameters;
+        return {
+          jobName: `${params.job_name_prefix}-${Date.now().toString()}`,
+          mode: params.mode as JobMode,
+          listName: params.list_name as string,
+          throttlingOption: params.throttling_option as string,
+          deliveryWindowHours: params.delivery_window_hours as number,
+          recyclePeople: params.recycle_people as boolean,
+          recyclePercentage:
+            (params.recycle_percentage as number | null) ?? null,
+        };
+      },
+      buildKnowledge: () =>
+        `${knowledge}\nThe dev app URL is ${env.DEV_APP_URL}.`,
+    }),
+    definePhaseSpec({
+      phase: observeJobPhase,
+      buildInput: (ctx) => {
+        const created = ctx.outputs[createJobPhase.name] as CreateJobOutput;
         return { jobId: created.jobId };
       },
+      buildKnowledge: () =>
+        `${knowledge}\nThe dev app URL is ${env.DEV_APP_URL}.`,
       onSuccess: (output, ctx) => {
-        const created = ctx.outputs[
-          createJobStubPhase.name
-        ] as CreateJobStubOutput;
+        const created = ctx.outputs[createJobPhase.name] as CreateJobOutput;
         recordObservation({
           runId: ctx.runId,
           targetType: "job",
           targetId: created.jobId,
           metrics: output,
-          screenshotPaths: [],
+          screenshotPaths: output.screenshotPaths,
           observedAt: output.observedAt,
         });
       },
@@ -86,6 +101,7 @@ const main = async (): Promise<void> => {
   let exitCode = 0;
   try {
     const result = await runSession({
+      runId,
       testCaseName,
       pipeline,
       tools: mcp.tools,

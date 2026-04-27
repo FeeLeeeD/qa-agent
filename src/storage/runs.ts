@@ -1,7 +1,6 @@
 import {
   closeRunDatabase,
   ensureReportsRoot,
-  generateRunId,
   getOpenDatabase,
   nowIso,
   openRunDatabase,
@@ -39,9 +38,11 @@ const toRunRow = (raw: RunDbRow): RunRow =>
     testCaseName: raw.test_case_name,
   });
 
-export const createRun = (input: CreateRunInput): CreateRunResult => {
+export const createRun = (
+  runId: string,
+  input: CreateRunInput
+): CreateRunResult => {
   ensureReportsRoot();
-  const runId = generateRunId();
   const { db, runDir } = openRunDatabase(runId);
   db.prepare(
     `INSERT INTO runs (id, started_at, finished_at, status, test_case_name)

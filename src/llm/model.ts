@@ -3,7 +3,6 @@ import type { LanguageModel } from "ai";
 import { loadEnv } from "../env.ts";
 
 const PORTKEY_BASE_URL = "https://api.portkey.ai/v1";
-const MODEL_SLUG = "@openrouter/anthropic/claude-sonnet-4.5";
 
 /**
  * Build the Portkey-flavoured OpenAI-compatible client. Headers mirror the
@@ -46,7 +45,5 @@ export const createModel = (): LanguageModel => {
       env.PORTKEY_CONFIG
     ),
   });
-  return portkey.chatModel(MODEL_SLUG);
+  return portkey.chatModel(env.PORTKEY_MODEL);
 };
-
-export const MODEL_LABEL = `${MODEL_SLUG} (Portkey → OpenRouter)`;

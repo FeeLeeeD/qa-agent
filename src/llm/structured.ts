@@ -42,7 +42,6 @@ export const generateStructuredObject = async <T>(
       system: args.system,
       prompt: args.prompt,
       temperature: args.temperature ?? 0,
-      abortSignal: args.abortSignal,
       tools: {
         [FINAL_ANSWER_TOOL]: tool({
           description:
@@ -51,6 +50,7 @@ export const generateStructuredObject = async <T>(
         }),
       },
       toolChoice: { type: "tool", toolName: FINAL_ANSWER_TOOL },
+      ...(args.abortSignal && { abortSignal: args.abortSignal }),
     });
 
     const call = result.steps
